@@ -1,0 +1,165 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: pac-advanced-demo
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "[push]"
+    pipelinesascode.tekton.dev/on-target-branch: "[main]"
+spec:
+  params:
+    - name: repo-url
+      value: "{{ repo_url }}"
+    - name: revision
+      value: "{{ revision }}"
+    - name: app-name
+      value: "pac-demo-advanced"
+    - name: image-repository
+      value: "quay.io/example/pac-demo-advanced"
+    - name: target-env
+      value: "dev"
+  workspaces:
+    - name: shared-workspace
+      emptyDir: {}
+  pipelineSpec:
+    params:
+      - name: repo-url
+        type: string
+      - name: revision
+        type: string
+      - name: app-name
+        type: string
+      - name: image-repository
+        type: string
+      - name: target-env
+        type: string
+    workspaces:
+      - name: shared-workspace
+    tasks:
+      - name: prepare-meta
+        params:
+          - name: revision
+            value: $(params.revision)
+        taskSpec:
+          params:
+            - name: revision
+              type: string
+          results:
+            - name: short-sha
+              type: string
+            - name: image-tag
+              type: string
+          steps:
+            - name: generate
+              image: registry.access.redhat.com/ubi9/ubi
+              script: |
+                SHORT_SHA="$(echo -n "$(params.revision)" | cut -c1-8)"
+                IMAGE_TAG="dev-${SHORT_SHA}"
+                echo "revision=$(params.revision)"
+                echo "short-sha=${SHORT_SHA}"
+                echo "image-tag=${IMAGE_TAG}"
+                echo -n "${SHORT_SHA}" > "$(results.short-sha.path)"
+                echo -n "${IMAGE_TAG}" > "$(results.image-tag.path)"
+      - name: write-build-info
+        runAfter:
+          - prepare-meta
+        params:
+          - name: app-name
+            value: $(params.app-name)
+          - name: repo-url
+            value: $(params.repo-url)
+          - name: image-repository
+            value: $(params.image-repository)
+          - name: image-tag
+            value: $(tasks.prepare-meta.results.image-tag)
+        workspaces:
+          - name: source
+            workspace: shared-workspace
+        taskSpec:
+          params:
+            - name: app-name
+              type: string
+            - name: repo-url
+              type: string
+            - name: image-repository
+              type: string
+            - name: image-tag
+              type: string
+          workspaces:
+            - name: source
+          steps:
+            - name: write
+              image: registry.access.redhat.com/ubi9/ubi
+              script: |
+                cat <<INFO > "$(workspaces.source.path)/build-info.txt"
+                app-name=$(params.app-name)
+                repo-url=$(params.repo-url)
+                image=$(params.image-repository):$(params.image-tag)
+                INFO
+                cat "$(workspaces.source.path)/build-info.txt"
+      - name: verify-build-info
+        runAfter:
+          - write-build-info
+        workspaces:
+          - name: source
+            workspace: shared-workspace
+        taskSpec:
+          workspaces:
+            - name: source
+          steps:
+            - name: verify
+              image: registry.access.redhat.com/ubi9/ubi
+              script: |
+                test -f "$(workspaces.source.path)/build-info.txt"
+                grep "image=" "$(workspaces.source.path)/build-info.txt"
+                echo "build-info.txt確認完了"
+      - name: deploy-to-dev
+        runAfter:
+          - verify-build-info
+        when:
+          - input: "$(params.target-env)"
+            operator: in
+            values:
+              - "dev"
+        params:
+          - name: app-name
+            value: $(params.app-name)
+          - name: image-tag
+            value: $(tasks.prepare-meta.results.image-tag)
+        taskSpec:
+          params:
+            - name: app-name
+              type: string
+            - name: image-tag
+              type: string
+          steps:
+            - name: deploy
+              image: registry.access.redhat.com/ubi9/ubi
+              script: |
+                echo "dev環境へdeployする想定です"
+                echo "app=$(params.app-name)"
+                echo "tag=$(params.image-tag)"
+    finally:
+      - name: summary
+        params:
+          - name: app-name
+            value: $(params.app-name)
+          - name: short-sha
+            value: $(tasks.prepare-meta.results.short-sha)
+          - name: image-tag
+            value: $(tasks.prepare-meta.results.image-tag)
+        taskSpec:
+          params:
+            - name: app-name
+              type: string
+            - name: short-sha
+              type: string
+            - name: image-tag
+              type: string
+          steps:
+            - name: print
+              image: registry.access.redhat.com/ubi9/ubi
+              script: |
+                echo "Pipeline summary"
+                echo "app=$(params.app-name)"
+                echo "short-sha=$(params.short-sha)"
+                echo "image-tag=$(params.image-tag)"
